@@ -1,0 +1,1393 @@
+---
+title: "Analyse_Data_Ful_Data"
+format: html
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(ggrepel)
+library(tibble)
+library(PhysicalActivity)
+library(activAnalyzer)
+library(stringr)
+library(ggpubr)
+library(car)
+library(rstatix)
+library(janitor)
+library(lme4)
+library(performance)
+library(lmtest)
+library(broom.mixed)
+library(DHARMa)
+library(glmmTMB)
+library(emmeans)
+library(ggdist)
+library(ggpp)
+library(ggbeeswarm)
+library(ggthemes)
+library(patchwork)
+library(MASS)
+library(moments)
+library(lmerTest)
+library(ggtext)
+library(modelsummary)
+library(MuMIn)
+library(ggh4x)
+```
+
+#Importation des données
+## Chemin d'accès
+```{r}
+WRK_PATH <- '/Users/gabrielsaid/Documents/ENS/2A/Memoire_2A/Code_R/Data'
+ILLUSTRATION <- "/Users/gabrielsaid/Documents/ENS/2A/Memoire_2A/Illustration/model_gamma_mixte"
+
+H3K9La_df_lactylation_nuclei <- read.csv(file.path(WRK_PATH, "H3K9La_df_lactylation_nuclei.csv"))
+```
+
+# Comptage du nombre de données par participant et condition
+```{r}
+resume_condition <- H3K9La_df_lactylation_nuclei %>%
+  count(Condition, Groupe_de_Fibre) %>%
+  pivot_wider(
+    names_from = Groupe_de_Fibre,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  adorn_totals(where = c("row", "col"))
+
+
+resume_identifiant <- H3K9La_df_lactylation_nuclei %>%
+  count(Identifiant, Groupe_de_Fibre) %>%
+  pivot_wider(
+    names_from = Groupe_de_Fibre,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  adorn_totals(where = c("row", "col"))
+```
+
+#Modèle linéaire mixte avec distribution Gamma
+## Postulat n°1 :  Variable réponse strictement positive
+```{r}
+# Vérifier l'absence de zéros ou valeurs négatives
+sum(H3K9La_df_lactylation_nuclei$Mean <= 0)
+range(H3K9La_df_lactylation_nuclei$Mean)
+```
+
+## Postulat n°2 :  Distribution de la réponse (forme Gamma)
+```{r}
+# Superposer la densité Gamma ajustée à l'histogramme
+fit_gamma <- fitdistr(H3K9La_df_lactylation_nuclei$Mean, "gamma")
+
+ggplot(H3K9La_df_lactylation_nuclei, aes(x = Mean)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "grey80", color = "white") +
+  geom_density(color = "blue", linewidth = 1) +
+  stat_function(
+    fun = dgamma,
+    args = list(shape = fit_gamma$estimate["shape"],
+                rate  = fit_gamma$estimate["rate"]),
+    color = "red", linewidth = 1, linetype = "dashed"
+  ) +
+  theme_bw()+
+  labs(title = "Distribution de la variable Moyenne",
+       subtitle = "Bleu = densité empirique de la variable Moyenne | Rouge = Gamma ajustée", 
+       x = "Moyenne",
+       y = "Densité")
+```
+## Postulat n°3 : Relation moyenne-variance (cœur du modèle Gamma)
+```{r}
+m_gamma <- glmmTMB(Mean ~ Condition * Groupe_de_Fibre + (1 | Identifiant),
+                  family = Gamma(link = "log"),
+                  data = H3K9La_df_lactylation_nuclei)
+
+# Moyenne vs variance par individu
+H3K9La_df_lactylation_nuclei %>%
+  group_by(Identifiant) %>%
+  summarise(m = mean(Mean), v = var(Mean)) %>%
+  ggplot(aes(x = m, y = v)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  scale_x_log10() + scale_y_log10() +
+  theme_bw()+
+  labs(title = "Relation moyenne-variance (log-log)", 
+       x = 'Moyenne', 
+       y = 'Variance')
+```
+
+## Postulat n°4 : Résidus — via DHARMa
+```{r}
+# Résidus DHARMa
+simulres <- simulateResiduals(m_gamma, n = 1000)
+
+# Graphique principal (2 panels)
+plot(simulres)
+
+# Test de dispersion
+testDispersion(simulres)
+
+# Test d'uniformité
+testUniformity(simulres)
+
+# Résidus vs prédicteurs
+plotResiduals(simulres, H3K9La_df_lactylation_nuclei$Condition)
+plotResiduals(simulres, H3K9La_df_lactylation_nuclei$Groupe_de_Fibre)
+plotResiduals(simulres, H3K9La_df_lactylation_nuclei$Identifiant)
+```
+
+## Comparaison de modèle
+```{r}
+# Modèle de référence — dispersion homogène
+m_gamma <- glmmTMB(Mean ~ Condition * Groupe_de_Fibre + (1 | Identifiant),
+              family = Gamma(link = "log"),
+              data = H3K9La_df_lactylation_nuclei, REML = FALSE)
+
+# Dispersion par Condition
+m_gamma2 <- glmmTMB(Mean ~ Condition * Groupe_de_Fibre + (1 | Identifiant),
+              family = Gamma(link = "log"),
+              dispformula = ~Condition,
+              data = H3K9La_df_lactylation_nuclei, REML = FALSE)
+
+# Dispersion par Groupe_de_Fibre
+m_gamma3 <- glmmTMB(Mean ~ Condition * Groupe_de_Fibre + (1 | Identifiant),
+              family = Gamma(link = "log"),
+              dispformula = ~Groupe_de_Fibre,
+              data = H3K9La_df_lactylation_nuclei, REML = FALSE)
+
+# Dispersion par interaction
+m_gamma4 <- glmmTMB(Mean ~ Condition * Groupe_de_Fibre + (1 | Identifiant),
+              family = Gamma(link = "log"),
+              dispformula = ~Condition * Groupe_de_Fibre,
+              data = H3K9La_df_lactylation_nuclei, REML = FALSE)
+
+# Avec pente aléatoire par individu
+m_gamma5 <- glmmTMB(Mean ~ Condition * Groupe_de_Fibre + (1 + Groupe_de_Fibre | Identifiant),
+                    family = Gamma(link = "log"),
+                    data = H3K9La_df_lactylation_nuclei, REML = FALSE)
+
+# Dispersion par Condition + Pente aléatoire
+m_gamma6 <- glmmTMB(Mean ~ Condition * Groupe_de_Fibre + (1 + Groupe_de_Fibre | Identifiant),
+              family = Gamma(link = "log"),
+              dispformula = ~Condition,
+              data = H3K9La_df_lactylation_nuclei, REML = FALSE)
+
+# Dispersion par Groupe de fibres + Pente aléatoire
+m_gamma7 <- glmmTMB(Mean ~ Condition * Groupe_de_Fibre + (1 + Groupe_de_Fibre | Identifiant),
+              family = Gamma(link = "log"),
+              dispformula = ~Groupe_de_Fibre,
+              data = H3K9La_df_lactylation_nuclei, REML = FALSE)
+
+# Dispersion sur interaction + Pente aléatoire
+m_gamma8 <- glmmTMB(Mean ~ Condition * Groupe_de_Fibre + (1 + Groupe_de_Fibre | Identifiant),
+              family = Gamma(link = "log"),
+              dispformula = ~Condition * Groupe_de_Fibre,
+              data = H3K9La_df_lactylation_nuclei, REML = FALSE)
+
+# Comparaison
+AIC(m_gamma, m_gamma2, m_gamma3, m_gamma4, m_gamma5, m_gamma6, m_gamma7, m_gamma8)
+```
+
+## Postulat n°4bis : Résidus — via DHARMa
+```{r, fig.width=10, fig.height=6}
+# Modèle conservé 
+model_gamma_final <- glmmTMB(Mean ~ Condition * Groupe_de_Fibre + (1 + Groupe_de_Fibre | Identifiant),
+              family = Gamma(link = "log"),
+              dispformula = ~Condition,
+              data = H3K9La_df_lactylation_nuclei, REML = TRUE)
+
+# Résidus DHARMa
+simulres6 <- simulateResiduals(model_gamma_final, n = 1000)
+plot(simulres6)
+testDispersion(simulres6)
+plotResiduals(simulres6, H3K9La_df_lactylation_nuclei$Condition)
+plotResiduals(simulres6, H3K9La_df_lactylation_nuclei$Groupe_de_Fibre)
+plotResiduals(simulres6, H3K9La_df_lactylation_nuclei$Identifiant)
+```
+## Postulat n°5 : normalité des effets aléatoires
+```{r}
+re <- ranef(model_gamma_final)$cond$Identifiant
+
+# Un QQ-plot par composante de l'effet aléatoire
+par(mfrow = c(1, ncol(re)))
+for(i in 1:ncol(re)){
+  qqnorm(re[[i]], main = names(re)[i])
+  qqline(re[[i]], col = "red")
+}
+```
+
+
+# Résultat du modèle
+```{r}
+# Obtenir le tableau des p-values globales
+resultats_anova_model_gamma_final <- car::Anova(model_gamma_final, type = "III")
+print(resultats_anova_model_gamma_final)
+cat('\n------------------Summary-----------------\n')
+summary(model_gamma_final)
+```
+
+## Post-hoc du modèle
+```{r}
+contrasts_exercice <- emmeans(
+  model_gamma_final,
+  pairwise ~ Condition,
+  adjust = "bonferroni",
+  type = "response"
+)
+
+
+summary(contrasts_exercice)
+confint(contrasts_exercice$contrasts)
+```
+
+###Post-Hoc par fibre
+```{r}
+contrasts_fibre <- emmeans(
+  model_gamma_final,
+  pairwise ~ Groupe_de_Fibre | Condition,
+  adjust = "bonferroni",
+  type = "response"
+)
+
+
+summary(contrasts_fibre)
+confint(contrasts_fibre$contrasts)
+```
+
+### Post-hoc Interaction / condition
+```{r}
+# Post-hoc par condition
+contrasts_condition <- emmeans(
+  model_gamma_final,
+  pairwise ~ Condition | Groupe_de_Fibre,
+  adjust = "bonferroni",
+  type = "response"
+)
+
+summary(contrasts_condition)
+confint(contrasts_condition$contrasts)
+```
+# Taille d'effet
+## Taille d'effet du modèle
+```{r}
+# Extraire les deux sigmas (un par condition)
+disp_params <- fixef(model_gamma_final)$disp
+sigma_controle <- exp(disp_params[1])
+sigma_ait      <- exp(disp_params[1] + disp_params[2])
+
+# Variance résiduelle = moyenne des deux variances
+var_residual <- mean(c(sigma_controle^2, sigma_ait^2))
+
+# Variance des effets fixes (sur l'échelle du lien log)
+var_fixed <- var(predict(model_gamma_final, re.form = NA))
+
+# Matrice de variance-covariance des effets aléatoires
+# (pente aléatoire → matrice 3x3 : intercept, Fibre2A, Fibre2B/2X)
+vc <- VarCorr(model_gamma_final)$cond$Identifiant
+var_random <- sum(diag(vc))  # somme des variances (trace de la matrice)
+
+# R²
+R2m <- var_fixed / (var_fixed + var_random + var_residual)
+R2c <- (var_fixed + var_random) / (var_fixed + var_random + var_residual)
+
+# ICC
+ICC <- var_random / (var_random + var_residual)
+
+cat("sigma Contrôle :", round(sigma_controle, 3), "\n")
+cat("sigma AIT      :", round(sigma_ait, 3), "\n")
+cat("var_residual   :", round(var_residual, 3), "\n")
+cat("var_fixed      :", round(var_fixed, 3), "\n")
+cat("var_random     :", round(var_random, 3), "\n")
+cat("R² marginal    :", round(R2m, 3), "\n")
+cat("R² conditionnel:", round(R2c, 3), "\n")
+cat("ICC            :", round(ICC, 3), "\n")
+```
+
+## Taille d'effet des constrates
+### Pour les contrastes Condition
+```{r}
+# Recalculer les contrastes sur l'échelle LOG (pour la taille d'effet)
+contrasts_condition_log <- emmeans(model_gamma_final,
+                                   pairwise ~ Condition | Groupe_de_Fibre,
+                                   adjust = "bonferroni")
+                                   # pas de type = "response" ici
+
+# Sigma sur l'échelle log
+sigma_manuelle <- sd(residuals(model_gamma_final))
+
+eff_res_condition <- eff_size(contrasts_condition_log, 
+                               sigma = sigma_manuelle, 
+                               edf = Inf)
+
+# Transformation en data.frame
+df_eff_condition <- as.data.frame(eff_res_condition) %>%
+  rename_with(~ "lower.CL", contains("LCL") | contains("lower")) %>%
+  rename_with(~ "upper.CL", contains("UCL") | contains("upper")) %>%
+  mutate(
+    effect.size = round(effect.size, 3),
+    lower.CL    = round(lower.CL, 3),
+    upper.CL    = round(upper.CL, 3),
+    Magnitude = case_when(
+      abs(effect.size) < 0.2 ~ "Négligeable",
+      abs(effect.size) < 0.5 ~ "Petit",
+      abs(effect.size) < 0.8 ~ "Moyen",
+      TRUE ~ "Large"
+    )
+  )
+
+print(df_eff_condition[, c("Groupe_de_Fibre", "contrast", "effect.size", "lower.CL", "upper.CL", "Magnitude")])
+```
+### Pour les contrastes Fibre
+```{r}
+# Recalculer les contrastes fibres sur l'échelle LOG (pour la taille d'effet)
+contrasts_fibre_log <- emmeans(model_gamma_final,
+                               pairwise ~ Groupe_de_Fibre | Condition,
+                               adjust = "bonferroni")
+                               # pas de type = "response" ici
+
+# Sigma sur l'échelle log (déjà calculé, mais rappel)
+sigma_manuelle <- sd(residuals(model_gamma_final))
+
+eff_res_fibre <- eff_size(contrasts_fibre_log, sigma = sigma_manuelle, edf = Inf)
+
+# Transformation en data.frame
+df_eff_fibre <- as.data.frame(eff_res_fibre) %>%
+  rename_with(~ "lower.CL", contains("LCL") | contains("lower")) %>%
+  rename_with(~ "upper.CL", contains("UCL") | contains("upper")) %>%
+  mutate(
+    effect.size = round(effect.size, 5),
+    lower.CL    = round(lower.CL, 3),
+    upper.CL    = round(upper.CL, 3),
+    Magnitude = case_when(
+      abs(effect.size) < 0.2 ~ "Négligeable",
+      abs(effect.size) < 0.5 ~ "Petit",
+      abs(effect.size) < 0.8 ~ "Moyen",
+      TRUE ~ "Large"
+    )
+  )
+
+print(df_eff_fibre[, c("Condition", "contrast", "effect.size", "lower.CL", "upper.CL", "Magnitude")])
+```
+
+# Analyse exploratoire : absence de différence post-exercice
+```{r}
+# ─────────────────────────────────────────────
+# ÉTAPE 1 — Échelle réponse (pour visualisation 
+# et lecture des moyennes)
+# ─────────────────────────────────────────────
+comp_fibres_response <- emmeans(
+  model_gamma_final, 
+  pairwise ~ Groupe_de_Fibre | Condition,
+  type = "response"   # back-transformation → unités originales
+)
+
+# ─────────────────────────────────────────────
+# ÉTAPE 2 — Échelle log (pour le test 
+# d'équivalence — OBLIGATOIRE)
+# ─────────────────────────────────────────────
+comp_fibres_log <- emmeans(
+  model_gamma_final, 
+  pairwise ~ Groupe_de_Fibre | Condition
+  # pas de type = "response" → reste sur l'échelle log
+)
+
+# ─────────────────────────────────────────────
+# ÉTAPE 3 — Test d'équivalence
+# delta défini depuis la différence au repos
+# ─────────────────────────────────────────────
+# Séquence de RM décroissants (de la référence vers des seuils plus stricts)
+delta_RM_values <- c(0.855, 0.875, 0.900, 0.920, 0.940, 0.960, 0.980)
+
+# Conversion en log
+delta_log_values <- abs(log(delta_RM_values))
+
+# Boucle
+results_list <- lapply(seq_along(delta_RM_values), function(i) {
+  
+  test_eq <- test(
+    comp_fibres_log$contrasts,
+    delta = delta_log_values[i],
+    side = "equivalence"
+  )
+  
+  df <- as.data.frame(test_eq)
+  df$delta_RM  <- delta_RM_values[i]
+  df$delta_pct <- paste0("±", round((1 - delta_RM_values[i]) * 100, 1), "%")
+  df$delta_log <- round(delta_log_values[i], 3)
+  df
+})
+
+results_sensitivity <- bind_rows(results_list)
+
+# Affichage focalisé sur EAI
+results_sensitivity %>%
+  filter(Condition == "Exercice Aigu Intermittent") %>%
+  dplyr::select(contrast, delta_RM, delta_pct, delta_log, p.value) %>%
+  mutate(
+    p.value    = round(p.value, 4),
+    Conclusion = ifelse(p.value < 0.05, "✓ Équivalent", "✗ Non conclu")
+  ) %>%
+  print(row.names = FALSE)
+
+# ─────────────────────────────────────────────
+# ÉTAPE 4 — IC à 90% (obligatoire pour TOST)
+# ─────────────────────────────────────────────
+confint(comp_fibres_log$contrasts, level = 0.90)
+
+# ─────────────────────────────────────────────
+# Dataframe des IC à 90% (pour les estimates)
+# ─────────────────────────────────────────────
+df_ic <- confint(comp_fibres_log$contrasts, level = 0.90) %>%
+  as.data.frame() %>%
+  dplyr::select(Condition, contrast, estimate, asymp.LCL, asymp.UCL)
+
+# ─────────────────────────────────────────────
+# Dataframe de l'analyse de sensibilité
+# ─────────────────────────────────────────────
+delta_RM_values  <- c(0.855, 0.875, 0.900, 0.920, 0.940, 0.960, 0.980)
+delta_log_values <- abs(log(delta_RM_values))
+
+results_list <- lapply(seq_along(delta_RM_values), function(i) {
+  test_eq <- test(
+    comp_fibres_log$contrasts,
+    delta  = delta_log_values[i],
+    side   = "equivalence",
+    adjust = "sidak"
+  )
+  df <- as.data.frame(test_eq)
+  df$delta_RM  <- delta_RM_values[i]
+  df$delta_pct <- paste0("±", round((1 - delta_RM_values[i]) * 100, 1), "%")
+  df$delta_log <- round(delta_log_values[i], 3)
+  df
+})
+
+# ─────────────────────────────────────────────
+# Assemblage final
+# ─────────────────────────────────────────────
+df_equivalence <- bind_rows(results_list) %>%
+  # Jointure avec les IC
+  left_join(df_ic, by = c("Condition", "contrast")) %>%
+  # Sélection et renommage
+  dplyr::select(
+    Condition,
+    Contraste    = contrast,
+    Estimate     = estimate.x,
+    IC90_low     = asymp.LCL,
+    IC90_up      = asymp.UCL,
+    Delta_RM     = delta_RM,
+    Delta_pct    = delta_pct,
+    Delta_log    = delta_log,
+    z            = z.ratio,
+    p            = p.value
+  ) %>%
+  mutate(
+    Estimate  = round(Estimate, 4),
+    IC90_low  = round(IC90_low, 4),
+    IC90_up   = round(IC90_up, 4),
+    z         = round(z, 3),
+    p         = round(p, 4),
+    Conclusion = ifelse(p < 0.05, "Équivalent", "Non conclu")
+  ) %>%
+  # Focus EAI si souhaité
+  filter(Condition == "Exercice Aigu Intermittent")
+
+print(df_equivalence, row.names = FALSE)
+
+# Export CSV si besoin
+# write.csv(df_equivalence, "resultats_equivalence.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+# Test d'équivalence avec une marge (delta) de 0.5 (à ajuster selon votre expertise)
+# Ici on teste si les différences sont comprises entre -0.5 et 0.5
+test_equiv <- test(comp_fibres$contrasts, delta = abs(log(0.855)), side = "equivalence")
+print(test_equiv)
+
+confint(comp_fibres$contrasts, level = 0.90)
+# Visualisation
+plot(comp_fibres$contrasts)
+# Ajouter les bornes d'équivalence manuellement
+#abline(v = c(-0.1, 0.1), lty = 2, col = "red")
+```
+#Visualisation des données
+##Création label
+```{r, fig.width=10, fig.height=6}
+# ── Création des label ─────────────────────────────────
+# Nombre de noyaux par Condition (indépendamment du groupe de fibre)
+n_par_condition <- H3K9La_df_lactylation_nuclei %>%
+  group_by(Condition) %>%
+  summarise(n = n()) %>%
+  arrange(Condition)
+
+label_condition <- setNames(
+  paste0(n_par_condition$Condition, "\n(n = ", format(n_par_condition$n, big.mark = " "), ")"),
+  n_par_condition$Condition
+)
+
+# Calcul des effectifs par fibre et par condition
+counts <- H3K9La_df_lactylation_nuclei %>%
+  group_by(Groupe_de_Fibre, Condition) %>%
+  tally() %>%
+  pivot_wider(names_from = Condition, values_from = n)
+
+# Création du vecteur de labels personnalisé
+# Note : Adaptez "Contrôle" et "Exercice Aigu Intermittent" aux noms exacts dans votre colonne Condition
+label_vec_2 <- counts %>%
+  mutate(full_label = paste0(
+    Groupe_de_Fibre, "\n",
+    "(n=", Contrôle, "  |  n=", `Exercice Aigu Intermittent`, ")"
+  )) %>%
+  pull(full_label)
+
+# On nomme le vecteur pour que ggplot fasse la correspondance avec les niveaux de l'axe X
+names(label_vec_2) <- counts$Groupe_de_Fibre
+
+
+n_total <- nrow(H3K9La_df_lactylation_nuclei)
+n_ctrl  <- n_distinct(H3K9La_df_lactylation_nuclei %>% 
+             filter(Condition == "Contrôle") %>% 
+             pull(Identifiant))
+n_ait   <- n_distinct(H3K9La_df_lactylation_nuclei %>% 
+             filter(Condition == "Exercice Aigu Intermittent") %>% 
+             pull(Identifiant))
+
+subtitle_text <- paste0(
+  "n = ", format(n_total, big.mark = " "), " noyaux")
+```
+
+##Lactylation globale
+### Lactylation entre Groupe Contrôle et AIT
+```{r, fig.width=10, fig.height=6}
+p_raincloud_global <- ggplot(H3K9La_df_lactylation_nuclei, 
+                              aes(x = Condition, y = Mean, fill = Condition)) +
+  stat_halfeye(
+    adjust        = 0.5,
+    width         = 0.4,
+    justification = -0.4,
+    .width        = 0,
+    point_colour  = NA
+  ) +
+  geom_boxplot(
+    width          = 0.2,
+    outlier.colour = NA,
+    alpha          = 0.5
+  ) +
+  stat_summary(
+    fun         = mean,
+    shape       = 21,
+    geom        = "point",
+    size        = 2,
+    color       = "black",
+    fill        = "orange",
+    show.legend = FALSE
+  ) +
+
+  # ── Barre de significativité ──────────────────────────────
+  # Barre horizontale
+  annotate("segment",
+           x        = 1, xend = 2,
+           y        = 95, yend = 95,
+           linewidth = 0.6,
+           color    = "grey30") +
+  # Trait vertical gauche
+  annotate("segment",
+           x        = 1, xend = 1,
+           y        = 94, yend = 95,
+           linewidth = 0.6,
+           color    = "grey30") +
+  # Trait vertical droit
+  annotate("segment",
+           x        = 2, xend = 2,
+           y        = 94, yend = 95,
+           linewidth = 0.6,
+           color    = "grey30") +
+  # Label p-value
+  annotate("text",
+           x     = 1.5,
+           y     = 100,
+           label = "p = 0.126",
+           size  = 4,
+           color = "grey30") +
+
+  coord_cartesian(ylim = c(0, 110)) +
+  theme_bw() +
+  theme(
+    legend.title = element_text(size = 16),
+    plot.title   = element_text(face = "bold"),
+    legend.text  = element_text(size = 14),
+    axis.title   = element_text(size = 14, face = "bold"),
+    axis.text.x  = element_text(size = 14),
+    axis.text.y  = element_text(size = 14)
+  ) +
+  scale_x_discrete(labels = label_condition) +
+  labs(
+    title    = "Raincloud plot de la lactylation entre Contrôle et Exercice Aigu Intermittent",
+    subtitle = subtitle_text,
+    y        = "Moyenne de l'intensité du signal des noyaux \npour H3K9La",
+    x        = "Groupe",
+    fill     = "Condition",
+    caption  = "Le point orange (●) représente la moyenne de chaque distribution | p-values issus du GLMM Gamma mixte (lien log)"
+  ) +
+  scale_fill_manual(values = c("lightblue", "salmon"))
+
+print(p_raincloud_global)
+
+# ── Enregistrement ────────────────────────────────────────────
+ggsave(
+  filename = file.path(ILLUSTRATION, "raincloud_global.png"),
+  plot     = p_raincloud_global,
+  width    = 10,
+  height   = 7,
+  dpi      = 300,
+  bg       = "white"
+)
+
+cat("\n✅ Graphique enregistré :",
+    file.path(ILLUSTRATION, "raincloud_global.png"), "\n")
+```
+
+#Lactylation entre Condition et entre Fibres
+```{r, fig.width=15, fig.height=8}
+# ── sig_condition_fibres avec toutes les colonnes nécessaires ──
+sig_condition_fibres <- data.frame(
+  Groupe_de_Fibre = c("Fibre 1", "Fibre 2A", "Fibre 2B/2X"),
+  label           = c("p = 0.127", "p = 0.157", "p = 0.408"),
+  x_min           = c(0.925, 1.925, 2.925),   # position Contrôle (gauche)
+  x_max           = c(1.075, 2.075, 3.075),   # position AIT (droite)
+  y_bar           = c(80, 80, 80),       # hauteur de la barre
+  y_text          = c(83, 83, 83)        # hauteur du label
+)
+
+# ── Graphique ─────────────────────────────────────────────────
+p_raincloud_condition <- ggplot(H3K9La_df_lactylation_nuclei, 
+                                aes(x = Groupe_de_Fibre, y = Mean, 
+                                    fill = Condition)) +
+  stat_halfeye(
+    adjust        = 0.4,
+    width         = 0.5,
+    justification = -0.4,
+    .width        = 0,
+    point_colour  = NA
+  ) +
+  geom_boxplot(
+    width          = 0.3,
+    outlier.colour = NA,
+    alpha          = 0.5
+  ) +
+  stat_summary(
+    fun         = mean,
+    geom        = "point",
+    size        = 3,
+    show.legend = FALSE,
+    color       = "orange",
+    position    = position_dodge(width = 0.3)
+  ) +
+  geom_segment(
+    data        = sig_condition_fibres,
+    aes(x = x_min, xend = x_max, y = y_bar, yend = y_bar),
+    inherit.aes = FALSE,
+    linewidth   = 0.6,
+    color       = "grey30"
+  ) +
+  geom_segment(
+    data        = sig_condition_fibres,
+    aes(x = x_min, xend = x_min, y = y_bar - 1, yend = y_bar),
+    inherit.aes = FALSE,
+    linewidth   = 0.6,
+    color       = "grey30"
+  ) +
+  geom_segment(
+    data        = sig_condition_fibres,
+    aes(x = x_max, xend = x_max, y = y_bar - 1, yend = y_bar),
+    inherit.aes = FALSE,
+    linewidth   = 0.6,
+    color       = "grey30"
+  ) +
+  geom_text(
+    data        = sig_condition_fibres,
+    aes(x = (x_min + x_max) / 2, y = y_text, label = label),
+    inherit.aes = FALSE,
+    size        = 4,
+    color       = "grey30"
+  ) +
+  coord_cartesian(ylim = c(0, 110)) +
+  theme_bw() +
+  theme(
+    legend.title = element_text(size = 16),
+    plot.title   = element_text(face = "bold"),
+    legend.text  = element_text(size = 14),
+    axis.title   = element_text(size = 16, face = "bold"),
+    axis.text.x  = element_text(size = 14),
+    axis.text.y  = element_text(size = 14)
+  ) +
+  scale_x_discrete(labels = label_vec_2) +
+  labs(
+    x        = "Types de fibres",
+    y        = "Moyenne de l'intensité du signal des noyaux pour H3K9La",
+    title    = "Raincloud plot de la lactylation entre Contrôle et Exercice Aigu Intermittent selon les fibres musculaires",
+    subtitle = subtitle_text,
+    fill     = "Condition",
+    caption  = "Le point orange (●) représente la moyenne de chaque distribution | p-values issus du GLMM Gamma mixte (lien log) avec correction de Bonferroni"
+  ) +
+  scale_fill_manual(values = c("lightblue", "salmon"))
+
+print(p_raincloud_condition)
+
+ggsave(
+  filename = file.path(ILLUSTRATION, "raincloud_condition_fibre.png"),
+  plot     = p_raincloud_condition,
+  width    = 14,
+  height   = 8,
+  dpi      = 300,
+  bg       = "white"
+)
+cat("\n✅ Graphique enregistré :",
+    file.path(ILLUSTRATION, "raincloud_condition_fibre.png"), "\n")
+```
+
+## Lactylation inter-fibre tout individu confondu 
+```{r, fig.width=20, fig.height=6}
+n_counts_fiber <- H3K9La_df_lactylation_nuclei %>%
+  group_by(Identifiant, Groupe_de_Fibre) %>%
+  summarise(nombre = n(), .groups = "drop")
+
+n_counts_fiber <- n_counts_fiber %>%
+  mutate(label = paste0(Identifiant, "\n(n = ", nombre, ")"))
+
+# Calcul du total de noyaux par fibre
+n_total_fiber <- H3K9La_df_lactylation_nuclei %>%
+  group_by(Groupe_de_Fibre) %>%
+  summarise(total = n(), .groups = "drop")
+
+fibres <- unique(H3K9La_df_lactylation_nuclei$Groupe_de_Fibre)
+                 
+for (f in fibres){
+  data_filtre <- H3K9La_df_lactylation_nuclei %>%
+    filter(Groupe_de_Fibre == f)
+  legende_filtre <- n_counts_fiber%>%
+    filter(Groupe_de_Fibre == f)
+  
+  # Récupérer le total de noyaux pour cette fibre
+  n_total <- n_total_fiber %>%
+    filter(Groupe_de_Fibre == f) %>%
+    pull(total)
+  
+  p <- ggplot(data_filtre,
+              aes(x = Identifiant, y = Mean, fill = Condition)) +
+    stat_halfeye(
+      adjust = 0.5,
+      width = 0.4,
+      justification = -0.6,
+      .width = 0,
+      point_colour = NA
+      ) +
+    geom_boxplot(
+      width = 0.3,
+      outlier.colour = NA,
+      alpha = 0.5
+      ) + 
+    stat_summary(
+      fun         = mean,
+      shape = 21, 
+      geom        = "point",
+      size        = 2,
+      color       = "black",
+      fill = 'orange',
+      show.legend = FALSE
+      ) +
+    coord_cartesian(ylim = c(0, 110)) +
+    theme_bw() +
+    theme(
+      legend.title = element_text(size = 16),
+      plot.title = element_text(face = "bold"),
+      legend.text  = element_text(size = 14),
+      axis.title = element_text(size = 14, face = "bold"),
+      axis.text.x = element_text(size = 12),
+      axis.text.y = element_text(size = 14)
+      ) +
+    labs(
+      title = paste("Raincloud plot du niveau de lactylation pour la", f, 'par individu'),
+      subtitle = paste0("n = ", n_total, " noyaux"),
+      y = "Moyenne de l'intensité du signal des noyaux pour H3K9La",
+      x = "Individus",
+      fill = "Condition"
+      ) +
+    facet_grid(~Condition, scales = "free_x", space = "free_x") +
+    scale_x_discrete(
+      labels = setNames(legende_filtre$label, legende_filtre$Identifiant)
+      ) +
+    scale_fill_manual(values = c("lightblue", "salmon"))
+  print(p)
+}
+
+ggplot(H3K9La_df_lactylation_nuclei, aes(x = Identifiant, y = Mean, fill = Condition)) +
+  stat_halfeye(
+    adjust = 0.5,
+    width = 0.4,
+    justification = -0.6,
+    .width = 0,
+    point_colour = NA
+    ) +
+  geom_boxplot(
+    width = 0.3,
+    outlier.colour = NA,
+    alpha = 0.5
+    ) + 
+  stat_summary(
+    fun         = mean,
+    shape = 21, 
+    geom        = "point",
+    size        = 2,
+    color       = "black",
+    fill = 'orange',
+    show.legend = FALSE
+    ) +
+  coord_cartesian(ylim = c(0, 110)) +
+  theme_bw() +
+  theme(
+    legend.title = element_text(size = 16),
+    plot.title = element_text(face = "bold"),
+    legend.text  = element_text(size = 14),
+    axis.title = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 14)
+    ) +
+    labs(
+      title = "Raincloud plot du niveau de lactylation par individu",
+      subtitle = paste0("n = ", sum(n_total_fiber$total), " noyaux"),
+      y = "Moyenne de l'intensité du signal des noyaux pour H3K9La",
+      x = "Individus",
+      fill = "Condition"
+      ) +
+  facet_grid(~Condition, scales = "free_x", space = "free_x") +
+  scale_x_discrete(
+    labels = setNames(n_counts_fiber$label, n_counts_fiber$Identifiant)
+    ) +
+  scale_fill_manual(values = c("lightblue", "salmon"))
+```
+##Lactylation inter-fibre intra-individu
+```{r}
+n_total <- nrow(H3K9La_df_lactylation_nuclei)
+y_global <- range(H3K9La_df_lactylation_nuclei$Mean, na.rm = TRUE)
+noms_identifiant <- unique(H3K9La_df_lactylation_nuclei$Identifiant)
+plot_list <- list()
+
+for (i in noms_identifiant) {
+  
+  df_temp <- H3K9La_df_lactylation_nuclei %>%
+    filter(Identifiant == i)
+  
+  # N total pour cet individu
+  n_total_indiv <- nrow(df_temp)
+  
+  # N par fibre pour cet individu
+  n_par_fibre_indiv <- df_temp %>%
+    group_by(Groupe_de_Fibre) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    mutate(label = paste0(Groupe_de_Fibre, "\n(n=", n, ")"))
+  
+  label_vec_indiv <- setNames(n_par_fibre_indiv$label, n_par_fibre_indiv$Groupe_de_Fibre)
+  
+  p <- ggplot(df_temp, aes(x = Groupe_de_Fibre, y = Mean)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(
+      aes(fill = Groupe_de_Fibre),
+      position = position_jitter(width = 0.25),
+      alpha = 0.8,
+      shape = 21,
+      size = 2,
+      color = "black",
+      stroke = 0.8
+    ) +
+  stat_summary(
+    fun         = mean,
+    shape = 21, 
+    geom        = "point",
+    size        = 2,
+    color       = "black",
+    fill = 'orange',
+    show.legend = FALSE
+  ) +
+    coord_cartesian(ylim = y_global) +
+    theme_bw() +
+    theme(
+      legend.title = element_text(size = 16),
+      plot.title   = element_text(face = "bold"),
+      axis.title   = element_text(face = "bold"),
+      legend.text  = element_text(size = 14),
+      axis.text.x  = element_text(size = 12),
+      axis.text.y  = element_text(size = 12)
+    ) +
+    scale_x_discrete(labels = label_vec_indiv) +
+    labs(
+      x        = "Types de fibres",
+      y        = "Moyenne de l'intensité du signal des noyaux pour H3K9La",
+      title    = paste("Boxplot - Moyenne de Lactylation -", i),
+      subtitle = paste0("n = ", n_total_indiv, " noyaux")
+    )
+  
+  plot_list[[i]] <- p
+  print(p)
+}
+
+combined_plot <- wrap_plots(plot_list, ncol = 4, nrow = 4)
+
+# 3. Exporter en PNG pleine page
+#ggsave(
+#  filename = "/Users/gabrielsaid/Documents/ENS/2A/Memoire_2A/Illustration/lactylation_nuclei_4x4.png",
+#  plot     = combined_plot,
+#  width    = 24,     # largeur totale en pouces (6 pouces × 4 colonnes)
+#  height   = 24,     # hauteur totale en pouces (6 pouces × 4 lignes)
+#  dpi      = 300,
+#  bg       = "white" # fond blanc (remplace le background supprimé)
+#)
+```
+
+```{r, fig.width=20, fig.height=6}
+
+# ── Définitions préalables ─────────────────────────────────────
+n_total        <- nrow(H3K9La_df_lactylation_nuclei)
+subtitle_text  <- paste0("n = ", n_total, " noyaux")
+
+# ── N par fibre et par condition ───────────────────────────────
+n_labels_p3 <- H3K9La_df_lactylation_nuclei %>%
+  group_by(Groupe_de_Fibre, Condition) %>%
+  summarise(n = n(), .groups = "drop")
+
+label_vec_ct <- n_labels_p3 %>%
+  filter(Condition == "Contrôle") %>%
+  mutate(label = paste0(Groupe_de_Fibre, "\n(n = ", n, ")")) %>%
+  { setNames(.$label, .$Groupe_de_Fibre) }
+
+label_vec_ait <- n_labels_p3 %>%
+  filter(Condition == "Exercice Aigu Intermittent") %>%
+  mutate(label = paste0(Groupe_de_Fibre, "\n(n = ", n, ")")) %>%
+  { setNames(.$label, .$Groupe_de_Fibre) }
+
+# ── Couleurs ───────────────────────────────────────────────────
+couleurs_condition <- c(
+  "Contrôle"                   = "lightblue",
+  "Exercice Aigu Intermittent" = "salmon"
+)
+
+# ── Barres de significativité ──────────────────────────────────
+sig_fibres <- data.frame(
+  Condition = c("Contrôle"),
+  x_min  = c(2),
+  x_max  = c(3),
+  y_bar  = c(73.0),
+  y_text = c(77.6),
+  label  = c("***")
+)
+
+# ── Graphique ──────────────────────────────────────────────────
+p3 <- ggplot(H3K9La_df_lactylation_nuclei,
+             aes(x = Groupe_de_Fibre, y = Mean, fill = Condition)) +
+  stat_halfeye(
+    adjust        = 0.5,
+    width         = 0.4,
+    justification = -0.7,
+    .width        = 0,
+    point_colour  = NA
+  ) +
+
+  geom_boxplot(width = 0.4, alpha = 0.8, outlier.colour = NA) +
+
+  stat_summary(fun = mean, shape = 21, geom = "point",
+               size = 2, color = "black", fill = "orange",
+               show.legend = FALSE) +
+
+  geom_segment(data = sig_fibres,
+               aes(x = x_min, xend = x_max, y = y_bar, yend = y_bar),
+               inherit.aes = FALSE, linewidth = 0.6, color = "grey30") +
+  geom_segment(data = sig_fibres,
+               aes(x = x_min, xend = x_min, y = y_bar - 1, yend = y_bar),
+               inherit.aes = FALSE, linewidth = 0.6, color = "grey30") +
+  geom_segment(data = sig_fibres,
+               aes(x = x_max, xend = x_max, y = y_bar - 1, yend = y_bar),
+               inherit.aes = FALSE, linewidth = 0.6, color = "grey30") +
+  geom_text(data = sig_fibres,
+            aes(x = (x_min + x_max) / 2, y = y_text, label = label),
+            inherit.aes = FALSE, size = 4.5, color = "grey30") +
+
+  facet_wrap(~ Condition, scales = "free_x") +
+
+  scale_fill_manual(values = couleurs_condition, name = "Condition") +
+
+  facetted_pos_scales(
+    x = list(
+      Condition == "Contrôle" ~
+        scale_x_discrete(labels = label_vec_ct),
+      Condition == "Exercice Aigu Intermittent" ~
+        scale_x_discrete(labels = label_vec_ait)
+    )
+  ) +
+
+  coord_cartesian(ylim = c(0, 90)) +
+
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title      = element_text(face = "bold", size = 13),
+    plot.subtitle   = element_text(size = 11, color = "grey40"),
+    legend.position = "none",
+    strip.text      = element_text(face = "bold", size = 12),
+    axis.title      = element_text(face = "bold"),
+    axis.text.x     = element_text(size = 10)
+  ) +
+
+  labs(
+    title    = "Différences entre types de fibres par condition",
+    subtitle = subtitle_text,
+    x        = "Type de fibre",
+    y        = "Moyenne de l'intensité du signal \ndes noyaux pour H3K9La",
+    caption  = "Le point orange (●) représente la moyenne de chaque distribution\nCorrection de Bonferroni · * p<0.05 · ** p<0.01 · *** p<0.001 | p-values issus du GLMM Gamma mixte (lien log)"
+  )
+
+print(p3)
+
+ggsave(
+  filename = file.path(ILLUSTRATION, "p3_fibres_condition.png"),
+  plot     = p3, width = 12, height = 7, dpi = 300, bg = "white"
+)
+```
+
+
+# Visualisation résultat modèle
+```{r}
+# ── Extraction des intercepts aléatoires ─────────────────────
+ranef_df <- ranef(model_gamma_final)$cond$Identifiant
+ranef_df$Identifiant <- rownames(ranef_df)
+colnames(ranef_df)[1] <- "intercept_aleatoire"
+
+# ── Jointure avec la condition de chaque individu ─────────────
+condition_ind <- H3K9La_df_lactylation_nuclei %>%
+  group_by(Identifiant, Condition) %>%
+  summarise(.groups = "drop")
+
+ranef_df <- ranef_df %>%
+  left_join(condition_ind, by = "Identifiant")
+
+# ── Ordonner : Contrôle en haut, AIT en bas ───────────────────
+ranef_df <- ranef_df %>%
+  arrange(desc(Condition), intercept_aleatoire) %>%
+  mutate(Identifiant = factor(Identifiant, levels = Identifiant))
+
+# ── Graphique ─────────────────────────────────────────────────
+p_ranef <- ggplot(ranef_df,
+                  aes(x     = Identifiant,
+                      y     = intercept_aleatoire,
+                      color = Condition)) +
+  
+  geom_hline(yintercept = 0,
+             linetype   = "dashed",
+             color      = "red",
+             linewidth  = 0.8) +
+  
+  geom_segment(aes(x    = Identifiant,
+                   xend = Identifiant,
+                   y    = 0,
+                   yend = intercept_aleatoire),
+               linewidth = 0.5) +
+  
+  geom_point(size = 3) +
+  
+  scale_color_manual(
+    values = c(
+      "Contrôle"                   = "lightblue",
+      "Exercice Aigu Intermittent" = "salmon"
+    ),
+    name = "Condition"
+  ) +
+  
+  # Séparateur visuel entre les deux groupes
+  geom_hline(yintercept  = 0,
+             linetype    = "solid",
+             color       = "grey80",
+             linewidth   = 0.3) +
+  
+  annotate("rect",
+           xmin  = 0.5,
+           xmax  = sum(ranef_df$Condition == "Contrôle") + 0.5,
+           ymin  = -Inf,
+           ymax  = Inf,
+           alpha = 0.05,
+           fill  = "lightblue") +
+  
+  annotate("rect",
+           xmin  = sum(ranef_df$Condition == "Contrôle") + 0.5,
+           xmax  = nrow(ranef_df) + 0.5,
+           ymin  = -Inf,
+           ymax  = Inf,
+           alpha = 0.05,
+           fill  = "salmon") +
+  
+  coord_flip() +
+  
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 11, color = "grey40"),
+    axis.title    = element_text(face = "bold"),
+    axis.text.y   = element_text(size = 11),
+    legend.position = "bottom"
+  ) +
+  
+  labs(
+    title    = "Intercepts aléatoires par individu",
+    x        = "Individu",
+    y        = "Intercept aléatoire",
+    caption  = "Ligne rouge = moyenne du modèle (intercept = 0)\nValeurs positives = individu au-dessus de la moyenne"
+  )
+
+print(p_ranef)
+
+# ── Enregistrement ────────────────────────────────────────────
+ggsave(
+  filename  = file.path(ILLUSTRATION, "ranef_individus.png"),
+  plot      = p_ranef,
+  width     = 8,
+  height    = 6,
+  dpi       = 300,
+  bg        = "white"
+)
+
+cat("\n✅ Graphique enregistré :",
+    file.path(ILLUSTRATION, "ranef_individus.png"), "\n")
+```
+# Analyse exploratoire : effet de lactatemie post-effort sur la lactylation
+## Importation csv lactatemie
+```{r}
+lactatemie <- read.csv2(file.path(WRK_PATH, "lactatemie.csv"))
+```
+
+## Étape 1 — Calculer la variable "delta lactatémie" pour rat AIT
+```{r}
+lactatemie_AIT <- lactatemie[grepl("^AIT", lactatemie$Identifiant), ]
+
+lactatemie_AIT$Delta_lactate <- lactatemie_AIT$AIT - lactatemie_AIT$Repos
+lactatemie_AIT$Ratio_lactate <- round(lactatemie_AIT$AIT / lactatemie_AIT$Repos, 2)
+```
+
+## Étape 2 — Agréger la lactylation par individu
+```{r}
+# Analyse globale (toutes fibres confondues)
+lactylation_globale <- H3K9La_df_lactylation_nuclei %>%
+  group_by(Identifiant) %>%
+  summarise(Mean_lactylation = mean(Mean, na.rm = TRUE))
+
+# Par type de fibre
+lactylation_fibre <- H3K9La_df_lactylation_nuclei %>%
+  group_by(Identifiant, Groupe_de_Fibre) %>%
+  summarise(Mean_lactylation = mean(Mean, na.rm = TRUE))
+
+# Calcul de lactylation moyenne au repos / post-effort et des delta - ratios
+Mean_lactylation_Controle <- H3K9La_df_lactylation_nuclei %>%
+  filter(grepl("^CT", Identifiant)) %>%
+  summarise(Moyenne = mean(Mean, na.rm = TRUE)) %>%
+  pull(Moyenne) 
+
+lactylation_globale$Delta_lactylation <- lactylation_globale$Mean_lactylation - Mean_lactylation_Controle
+lactylation_globale$Ratio_lactylation <- lactylation_globale$Mean_lactylation / Mean_lactylation_Controle
+
+
+# Calcul de lactylation moyenne au repos / post-effort et des delta - ratios Par type de fibre
+Mean_lactylation_Controle_fibre <- H3K9La_df_lactylation_nuclei %>%
+  filter(grepl("^CT", Identifiant)) %>%
+  group_by(Groupe_de_Fibre) %>%
+  summarise(Moyenne_Contrôle = mean(Mean, na.rm = TRUE)) %>%
+  ungroup()
+
+lactylation_fibre <- lactylation_fibre %>%
+  left_join(Mean_lactylation_Controle_fibre,
+            by = "Groupe_de_Fibre")
+
+lactylation_fibre <- lactylation_fibre %>%
+  mutate(
+    Delta_lactylation = Mean_lactylation - Moyenne_Contrôle,
+    Ratio_lactylation = Mean_lactylation / Moyenne_Contrôle
+  )
+```
+
+## Étape 3 — Jointure avec le delta lactatémie
+```{r}
+# Globale
+corr_globale <- lactylation_globale %>%
+  left_join(lactatemie, by = "Identifiant") %>%
+  left_join(lactatemie_AIT %>% 
+              dplyr::select(Identifiant, Delta_lactate, Ratio_lactate), 
+            by = "Identifiant")
+
+# Par fibre
+corr_fibre <- lactylation_fibre %>%
+  left_join(lactatemie, by = "Identifiant")%>%
+  left_join(lactatemie_AIT %>% 
+              dplyr::select(Identifiant, Delta_lactate, Ratio_lactate), 
+            by = "Identifiant")
+```
+
+##Étape 4 — Corrélations (seulement les rats exercice)
+```{r}
+# Filtrer uniquement les rats exercice (ceux qui ont un delta)
+corr_ex_globale <- corr_globale %>% filter(!is.na(Delta_lactate))
+corr_ex_fibre   <- corr_fibre   %>% filter(!is.na(Delta_lactate))
+
+# Violation de la normalité pour certaines catégories donc Spearman
+```
+
+##Étape 4bis — Corrélations globale
+```{r}
+# --- Corrélation globale ---
+cor.test(corr_ex_globale$Ratio_lactate,
+         corr_ex_globale$Ratio_lactylation,
+         method = "spearman")  # Spearman car n=8, pas de normalité garantie
+
+ggplot(corr_ex_globale, aes(x = Ratio_lactate, y = Ratio_lactylation)) +
+  geom_point(size = 3) +
+    geom_text_repel(aes(label = Identifiant),   # <- nom du rat
+                    size = 3,
+                    max.overlaps = 20) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(title = "Corrélation globale : Ratio lactatémie ~ Ratio de lactylation H3K9la",
+       x = "Ratio Lactatémie (post-exercice / contrôle)",
+       y = "Ratio Lactylation (Exercice / contrôle) (H3K9la)") +
+  theme_bw()
+```
+
+##Étape 4bis — Corrélations par fibre
+```{r, fig.width=20, fig.height=6}
+# --- Corrélation par type de fibre ---
+corr_ex_fibre %>%
+  group_by(Groupe_de_Fibre) %>%
+  summarise(
+    r = cor(Ratio_lactate, Ratio_lactylation, method = "spearman"),
+    p = cor.test(Ratio_lactate, Ratio_lactylation, method = "spearman")$p.value
+  )
+
+fibres <- unique(corr_ex_fibre$Groupe_de_Fibre)
+
+for (f in fibres) {
+
+  p <- ggplot(subset(corr_ex_fibre, Groupe_de_Fibre == f),
+              aes(x = Ratio_lactate,
+                  y = Ratio_lactylation)) +
+    geom_point(size = 3) +
+    geom_text_repel(aes(label = Identifiant),   # <- nom du rat
+                    size = 3,
+                    max.overlaps = 20) +
+    geom_smooth(method = "lm", se = TRUE) +
+    labs(title = paste("Corrélation Ratio lactatémie ~ Ratio de lactylation H3K9la :", f),
+         x = "Ratio Lactatémie (post-exercice / contrôle)",
+         y = "Ratio Lactylation (Exercice / contrôle) (H3K9la)") +
+    theme_bw()
+
+  print(p)
+}
+
+ggplot(corr_ex_fibre, aes(x = Ratio_lactate, y = Ratio_lactylation, color = Groupe_de_Fibre)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE) +
+  facet_wrap(~Groupe_de_Fibre) +
+  geom_text_repel(aes(label = Identifiant),   # <- nom du rat
+                    size = 3,
+                    max.overlaps = 20) +
+  labs(title = "Corrélation : Ratio lactatémie ~ Ratio de lactylation H3K9la",
+       x = "Ratio Lactatémie (post-exercice / contrôle)",
+       y = "Ratio Lactylation (Exercice / contrôle) (H3K9la)") +
+  theme_bw()
+```
+
+```{r, fig.width=20, fig.height=6}
+model <- lm(Mean_lactylation ~ Ratio_lactate + I(Ratio_lactate^2),
+   data = corr_ex_globale)
+
+a <- coef(model)["I(Ratio_lactate^2)"]
+b <- coef(model)["Ratio_lactate"]
+
+optimum <- -b / (2 * a)
+optimum
+
+check_model(model)
+```
+
+#Visualisation lactylation globale
+```{r}
+ggplot(corr_ex_globale,
+       aes(x = Ratio_lactate,
+           y = Ratio_lactylation)) +
+
+  geom_point(size = 3, alpha = 0.8) +
+
+  stat_smooth(method = "lm",
+              formula = y ~ x + I(x^2),
+              se = TRUE) +
+    geom_text_repel(aes(label = Identifiant),   # <- nom du rat
+                    size = 3,
+                    max.overlaps = 20) +
+
+  theme_bw() +
+  labs(title = "Relation dose–réponse entre la lactatémie et la lactylation du site H3K9",
+       x = "Ratio Lactate (post-exercice / repos)",
+       y = "Ratio Lactylation (Exercice / contrôle) (H3K9la)", 
+       caption  = "Visualisation réalisée dans une démarche exploratoire, sans inférence statistique")
+```
+
+#Visualisation lactylation par fibre
+```{r, fig.width=20, fig.height=6}
+ggplot(corr_ex_fibre,
+       aes(x = Ratio_lactate,
+           y = Ratio_lactylation)) +
+
+  geom_point(size = 3) +
+
+  geom_smooth(method = "lm",
+              formula = y ~ x + I(x^2),
+              se = TRUE) +
+
+  facet_wrap(~Groupe_de_Fibre) +
+
+  theme_bw() +
+    geom_text_repel(aes(label = Identifiant),   # <- nom du rat
+                    size = 3,
+                    max.overlaps = 20) +
+  labs(title = "Relation dose–réponse par type de fibre",
+       x = "Ratio Lactatémie (post-exercice / repos)",
+       y = "Ratio Lactylation (Exercice / contrôle) (H3K9la)")
+
+fibres <- unique(corr_ex_fibre$Groupe_de_Fibre)
+
+for (f in fibres) {
+
+  df_sub <- subset(corr_ex_fibre, Groupe_de_Fibre == f)
+
+  p <- ggplot(df_sub,
+              aes(x = Ratio_lactate,
+                  y = Ratio_lactylation)) +
+
+    geom_point(size = 3) +
+    geom_text_repel(aes(label = Identifiant),   # <- nom du rat
+                    size = 3,
+                    max.overlaps = 20) +
+    geom_smooth(method = "lm",
+                formula = y ~ x + I(x^2),
+                se = TRUE) +
+
+    labs(title = paste("Dose–réponse :", f),
+         x = "Ratio Lactatémie (post-exercice / repos)",
+         y = "Ratio Lactylation (Exercice / contrôle) (H3K9la)", 
+         caption  = "Visualisation réalisée dans une démarche exploratoire, sans inférence statistique") +
+
+    theme_bw()
+
+  print(p)
+}
+```
+
+
+# Analyse exploratoire : effet du sexe
+
+
