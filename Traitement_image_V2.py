@@ -1,3 +1,28 @@
+###################################################
+#Nécessiter d'installer ces macros en raccourcis clavier (Plugins › Macros › StartupMacros ) pour que le code code fonctionne
+#// Assigner groupe Fibre I
+#macro "Set Group 1 [s]" {
+#    roiManager("select", roiManager("index"));
+#    RoiManager.setGroup(1);
+#    roiManager("Set Color", "cyan");
+#    roiManager("update");
+#}
+#// Assigner groupe Fibre IIa
+#macro "Set Group 2 [f]" {
+#    roiManager("select", roiManager("index"));
+#    RoiManager.setGroup(2);
+#    roiManager("Set Color", "red");
+#    roiManager("update");
+#}
+#// Assigner groupe Fibre IIb/IIx
+#macro "Set Group 3 [x]" {
+#    roiManager("select", roiManager("index"));
+#    RoiManager.setGroup(3);
+#    roiManager("Set Color", "yellow");
+#    roiManager("update");
+#}
+
+
 from ij import IJ
 from ij.text import TextWindow
 from ij import WindowManager
